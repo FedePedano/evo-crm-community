@@ -222,6 +222,11 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-evoai_dev_password}
       DB_NAME: ${POSTGRES_DATABASE:-evo_community}
       DB_SSLMODE: ${DB_SSLMODE:-disable}
+      # El core (GORM + advisory locks en migraciones) no anda en pooler
+      # transaction mode: va por directa 5432 (DB_PORT) con pool chico, ya que
+      # el pool de sesión de Supabase es limitado (15). Rails usa 6543.
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-10}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-100}
       PORT: "5555"
       EVOLUTION_BASE_URL: http://evo-crm:3000
       EVO_AUTH_BASE_URL: http://evo-auth:3001
