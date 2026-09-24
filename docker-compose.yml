@@ -70,7 +70,7 @@ services:
     environment:
       RAILS_ENV: ${RAILS_ENV:-development}
       REDIS_URL: redis://:${REDIS_PASSWORD:-evoai_redis_pass}@redis:6379/1
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       # EVO-1999: this service's command already runs db:create && db:migrate, and
       # the image migrates on boot (entrypoint). RUN_MIGRATIONS=false avoids doubling.
       RUN_MIGRATIONS: "false"
@@ -98,7 +98,7 @@ services:
     environment:
       RAILS_ENV: ${RAILS_ENV:-development}
       REDIS_URL: redis://:${REDIS_PASSWORD:-evoai_redis_pass}@redis:6379/1
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       # EVO-1999: sidekiq must not run migrations (the web service already covers it).
       RUN_MIGRATIONS: "false"
     depends_on:
@@ -129,7 +129,7 @@ services:
     environment:
       RAILS_ENV: ${RAILS_ENV:-development}
       REDIS_URL: redis://:${REDIS_PASSWORD:-evoai_redis_pass}@redis:6379/0
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       EVO_AUTH_SERVICE_URL: http://evo-auth:3001
       EVO_AI_CORE_SERVICE_URL: http://evo-core:5555
       # Same Fernet key core/processor read as ENCRYPTION_KEY; the CRM encrypts AI credentials with it.
@@ -174,7 +174,7 @@ services:
     environment:
       RAILS_ENV: ${RAILS_ENV:-development}
       REDIS_URL: redis://:${REDIS_PASSWORD:-evoai_redis_pass}@redis:6379/0
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       EVO_AUTH_SERVICE_URL: http://evo-auth:3001
       EVO_AI_CORE_SERVICE_URL: http://evo-core:5555
       # Same Fernet key core/processor read as ENCRYPTION_KEY; the CRM encrypts AI credentials with it.
@@ -216,12 +216,12 @@ services:
       - "5565:5555"
     env_file: .env
     environment:
-      DB_HOST: postgres
-      DB_PORT: "5432"
+      DB_HOST: ${DB_HOST:-postgres}
+      DB_PORT: ${DB_PORT:-5432}
       DB_USER: ${POSTGRES_USERNAME:-postgres}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-evoai_dev_password}
       DB_NAME: ${POSTGRES_DATABASE:-evo_community}
-      DB_SSLMODE: disable
+      DB_SSLMODE: ${DB_SSLMODE:-disable}
       PORT: "5555"
       EVOLUTION_BASE_URL: http://evo-crm:3000
       EVO_AUTH_BASE_URL: http://evo-auth:3001
@@ -250,7 +250,7 @@ services:
       - "8011:8000"
     env_file: .env
     environment:
-      POSTGRES_CONNECTION_STRING: postgresql://${POSTGRES_USERNAME:-postgres}:${POSTGRES_PASSWORD:-evoai_dev_password}@postgres:5432/${POSTGRES_DATABASE:-evo_community}
+      POSTGRES_CONNECTION_STRING: ${POSTGRES_CONNECTION_STRING:-postgresql://postgres:evoai_dev_password@postgres:5432/evo_community}
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-evoai_redis_pass}
