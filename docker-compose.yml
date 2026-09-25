@@ -137,6 +137,9 @@ services:
       BOT_RUNTIME_URL: http://evo-bot-runtime:8080
       BOT_RUNTIME_SECRET: ${BOT_RUNTIME_SECRET:-evo-bot-runtime-dev-secret}
       BOT_RUNTIME_POSTBACK_BASE_URL: http://evo-crm:3000
+      # F1 perf: 2 workers x 5 threads absorbem as rajadas paralelas do front
+      # (6-10 API calls por secao). ~330MB por worker, RAM livre no VPS.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
     volumes:
       - ./evo-ai-crm-community:/app:delegated
       - crm_bundle:/usr/local/bundle
