@@ -258,7 +258,13 @@ services:
       - "8011:8000"
     env_file: .env
     environment:
-      POSTGRES_CONNECTION_STRING: ${POSTGRES_CONNECTION_STRING:-postgresql://postgres:evoai_dev_password@postgres:5432/evo_community}
+      # El motor async (ADK/asyncpg) va DIRECTO a 5432, no al pooler 6543:
+      # Supavisor guarda prepared statements huerfanos (__asyncpg_stmt_N__) que
+      # revientan cada restart con DuplicatePreparedStatement. En directo no hay
+      # pooler en el medio y los prepared statements funcionan normal.
+      # Overridea el POSTGRES_CONNECTION_STRING global (pooler 6543).
+      POSTGRES_CONNECTION_STRING: postgresql://${POSTGRES_USERNAME:-postgres}:${POSTGRES_PASSWORD:-evoai_dev_password}@${POSTGRES_HOST:-postgres}:5432/${POSTGRES_DATABASE:-evo_community}?sslmode=require
+      DB_PGBOUNCER: "false"
       REDIS_HOST: redis
       REDIS_PORT: "6379"
       REDIS_PASSWORD: ${REDIS_PASSWORD:-evoai_redis_pass}
