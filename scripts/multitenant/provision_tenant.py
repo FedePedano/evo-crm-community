@@ -94,8 +94,8 @@ def provision(slug, owner_user_id=None, plan='free', fail_at=None):
             if fail_at == 'create-schema':
                 raise RuntimeError('fallo simulado tras CREATE SCHEMA')
             row = conn.execute(
-                """INSERT INTO public.tenants (slug, schema_name, status, plan)
-                   VALUES (%s, %s, 'provisioning', %s) RETURNING id""",
+                """INSERT INTO public.tenants (slug, schema_name, status, plan, created_at, updated_at)
+                   VALUES (%s, %s, 'provisioning', %s, now(), now()) RETURNING id""",
                 (slug, schema, plan)).fetchone()
             tenant_id = row[0]
             if fail_at == 'registry':

@@ -1,0 +1,114 @@
+# STAGING local — experimento multi-tenant A2 (rama exp/multitenant-a2).
+# Stack reducido contra Supabase TEST. Puertos propios, sin contacto con prod.
+# Uso: docker compose -f docker-compose.staging.yml up --build -d
+# Credenciales en .env.test (git-ignorado). NUNCA apuntar a prod.
+
+name: beexa-staging
+
+services:
+  redis-staging:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${STAGING_REDIS_PASSWORD}"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - staging_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${STAGING_REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  crm-staging:
+    build:
+      context: ./evo-ai-crm-community
+      dockerfile: docker/Dockerfile
+      args:
+        BUNDLE_WITHOUT: ""
+        RAILS_ENV: staging
+        RAILS_SERVE_STATIC_FILES: "false"
+        GIT_SHA: staging-local
+    ports:
+      - "3100:3000"
+    env_file:
+      - .env.test
+    environment:
+      RAILS_ENV: staging
+      POSTGRES_HOST: ${STAGING_POSTGRES_HOST}
+      POSTGRES_PORT: ${STAGING_POSTGRES_PORT}
+      POSTGRES_USERNAME: ${STAGING_POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${SUPABASE_TEST_DB_PASSWORD}
+      POSTGRES_DATABASE: ${STAGING_POSTGRES_DATABASE}
+      POSTGRES_SSLMODE: ${STAGING_POSTGRES_SSLMODE}
+      DB_PGBOUNCER: "false" # session-mode: prepared statements + advisory locks OK
+      REDIS_URL: redis://:${STAGING_REDIS_PASSWORD}@redis-staging:6379/0
+      SECRET_KEY_BASE: ${STAGING_SECRET_KEY_BASE}
+      RUN_MIGRATIONS: "true" # db:prepare en boot = replay real de migraciones
+      RAILS_MAX_THREADS: 5
+      WEB_CONCURRENCY: 1 # RAM limitada en staging local
+      # Servicios no levantados en staging: dummies para que el boot no falle
+      EVO_AUTH_SERVICE_URL: http://localhost:3999
+      EVO_AI_CORE_SERVICE_URL: http://localhost:3998
+      EVO_AI_ENCRYPTION_KEY: XoQPOBw2FrzjQS11utERG9qO2MsAnXFxlhIns_uUxRk=
+      BOT_RUNTIME_URL: http://localhost:3997
+      BOT_RUNTIME_SECRET: staging-dummy
+    volumes:
+      - ./evo-ai-crm-community:/app:delegated
+    tmpfs:
+      - /app/tmp
+      - /app/log
+    depends_on:
+      redis-staging:
+        condition: service_healthy
+    entrypoint: docker/entrypoints/rails.sh
+    command: ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  sidekiq-staging:
+    build:
+      context: ./evo-ai-crm-community
+      dockerfile: docker/Dockerfile
+      args:
+        BUNDLE_WITHOUT: ""
+        RAILS_ENV: staging
+        RAILS_SERVE_STATIC_FILES: "false"
+        GIT_SHA: staging-local
+    env_file:
+      - .env.test
+    environment:
+      RAILS_ENV: staging
+      POSTGRES_HOST: ${STAGING_POSTGRES_HOST}
+      POSTGRES_PORT: ${STAGING_POSTGRES_PORT}
+      POSTGRES_USERNAME: ${STAGING_POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${SUPABASE_TEST_DB_PASSWORD}
+      POSTGRES_DATABASE: ${STAGING_POSTGRES_DATABASE}
+      POSTGRES_SSLMODE: ${STAGING_POSTGRES_SSLMODE}
+      DB_PGBOUNCER: "false"
+      REDIS_URL: redis://:${STAGING_REDIS_PASSWORD}@redis-staging:6379/0
+      SECRET_KEY_BASE: ${STAGING_SECRET_KEY_BASE}
+      RUN_MIGRATIONS: "false" # la web ya migra (EVO-1999)
+      SIDEKIQ_CONCURRENCY: 5
+      EVO_AUTH_SERVICE_URL: http://localhost:3999
+      EVO_AI_CORE_SERVICE_URL: http://localhost:3998
+      EVO_AI_ENCRYPTION_KEY: XoQPOBw2FrzjQS11utERG9qO2MsAnXFxlhIns_uUxRk=
+      BOT_RUNTIME_URL: http://localhost:3997
+      BOT_RUNTIME_SECRET: staging-dummy
+    volumes:
+      - ./evo-ai-crm-community:/app:delegated
+    tmpfs:
+      - /app/tmp
+      - /app/log
+    depends_on:
+      redis-staging:
+        condition: service_healthy
+    entrypoint: docker/entrypoints/rails.sh
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+    profiles: ["sidekiq"] # arrancar explícito: --profile sidekiq
+
+volumes:
+  staging_redis:
