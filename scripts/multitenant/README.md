@@ -11,3 +11,9 @@
 Uso:
   python3 provision_tenant.py demo_inmo [--owner <uuid> --plan free]
   python3 provision_tenant.py demo_x --fail-at seed   # probar limpieza
+  python3 deprovision_tenant.py demo_x --i-am-sure demo_x
+  python3 e2e_tenant_switch.py   # replica TenantSwitcher: 160 reqs cruzados
+                                 # entre 2 tenants + slugs inválidos, exige
+                                 # cero fuga, cero search_path residual y 404
+                                 # fail-closed (válido con Ruby 3.4.4 `ruby -c`
+                                 # para los .rb; toolchain en /tmp, fuera del repo)
