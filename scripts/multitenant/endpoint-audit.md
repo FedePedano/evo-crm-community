@@ -43,3 +43,13 @@ ausentes: segments, evolution_hub), 302s. Ningún `PG::UndefinedTable` en logs:
 - Rutas `sin-dato` (inbox/canal/conversación real) se auditan con seeds
   completos (opción D).
 - Tokens y seeds solo existen en staging; nada toca producción.
+
+## Apéndice: barrido mutante POST/PUT/PATCH (2026-10-02)
+
+341 rutas con cuerpo `{}` vacío, DELETE excluido. 318 PASS (4xx de
+validación/auth), 16 500 y 7 503. Cero `PG::UndefinedTable` en logs:
+**ningún 500 por lectura de `public`**. Los 16 500, todos preexistentes o
+ambientales: evo-core ausente (agents ×3), params faltantes (inboxes,
+scheduled_actions, automation_rules, macros, callbacks, authorizations,
+webhooks FB/IG), `authenticate_user!` inexistente (oauth), template
+faltante (csat), `tagged` en BroadcastLogger (webhooks ERP/purchases).
