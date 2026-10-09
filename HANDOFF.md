@@ -2,6 +2,8 @@
 
 > Estado al **2026-10-09**, rama `exp/multitenant-a2`. Documento hermano de
 > `AGENTS.md` y `INTEGRAR_NUEVO_CANAL.txt`.
+> Plan de ejecución final: `scripts/multitenant/PLAN-EJECUCION.md`.
+> Contrato de slug/seguridad: `scripts/multitenant/CONTRACT.md`.
 
 ---
 
@@ -35,6 +37,10 @@ Progreso por servicio (evidencia en §4):
   Solo el provisioning/seed usa `/public,extensions`.
 - `evo_community` (CRM+Auth) y `evo_campaign` (Flow) son bases distintas; cada
   una con sus schemas de tenant.
+- **Un solo formato de slug** (ver `CONTRACT.md`): canónico en
+  `public.tenants.slug`; PG `cliente_<slug>`, CH `tenant_id=<slug>`,
+  Processor `tenant_slug=<slug>`, Redis scope `<slug>`. Nunca derivado por
+  servicio.
 
 ### Decisiones por servicio
 
@@ -47,7 +53,11 @@ Spec `tenant_isolation_spec.rb` (5/5) en `spec/multitenant/`.
 
 **Auth (`a01ded9`)** — único endpoint tenant-aware: `validate` devuelve
 `tenants[]` por email. login/refresh/me/register sin tenants, JWT sin claims
-de tenant. Falta: `status_statement` fall-resuelto para login verdadero.
+de tenant. **Pendiente (Fase 0, plan final):** cookie host-scope a
+`beexa-auth.evonectech.com` (hoy `COOKIE_DOMAIN=.evonectech.com` compartido),
+`AUTH_ALLOWED_HOSTS`, claims `tenants[]` en JWT y **403 por claims**
+(§CONTRACT 4). `_evo_rt` scope ya; verificar consumidores de `_evo_at`.
+Pendiente (Track D): `status_statement` fall-resuelto para login verdadero.
 
 **Flow (`d639ab5`)** — overlay schema-per-tenant (seam `tenant_db_context`,
 `options.search_path` por migración, `SET LOCAL` dentro de txn) + propagación
@@ -60,16 +70,33 @@ de `tenantId` por todo el pipeline:
 - `journey-trigger-processor`: **fail-closed** si `MULTITENANT_SCHEMA` está
   activado y el evento no trae `tenantId`; log total con `withoutTenantAttribution`.
 
-**Processor (pendiente, decisión tomada):** columna `tenant_slug` en las
-tablas + RLS.
+**Processor (pendiente, decisión tomada — Track B, paralelo desde Día 1):**
+columna `tenant_slug` en las tablas + RLS.
 - **`ENABLE`/`FORCE ROW LEVEL SECURITY`** + política única
   `tenant_slug = current_setting('app.tenant_slug')`.
 - `SET LOCAL app.tenant_slug` por request/job. **No** editar ~30 `WHERE`.
+- **13 tablas**: las 12 de `processor-tenant-migration.sql` + **`users`**
+  (la migración NO la cubre; revisar `plans/features/plan_features` como
+  globales vs tenant).
+- Los **2 `SessionLocal()` propios** (`tool_builder.py:70`,
+  `custom_tools.py:84`) + `database.py:63` → sesiones tenant-scoped.
+- **Aserción de arranque** post-`create_all`: `relrowsecurity = true` en las
+  13 tablas ⇒ fail rápido si alguna no tiene RLS (`FAIL_FAST_MULTITENANT=1`).
+- **Reescribir 2 tests legacy single-tenant** (`test_agent_object_authz.py`
+  "no owner column", `test_test_panel_cross_user_isolation.py` pool-wide).
+- Fix `NameError: name 'request' is not defined` (11 archivos `*_routes.py`).
 
 **ClickHouse (decisión tomada):** setting
 `max_bytes_before_external_group_by` con valor en bytes (env-configurable) en
 los 3 sitios (`clickhouse.service.ts:51,102`, `batch-database-optimizer.service.ts:211`).
 **No pinchar versión**; verificar la versión real en prod antes de aplicar.
+**Backfill (2.4 ampliado):** `createContactEventsTable` ordena por
+`(occurred_at, event_type)` SIN `tenant_id` (`:620`) → `ALTER TABLE ... UPDATE
+tenant_id='<slug>' WHERE tenant_id='default'` es viable (CH bloquea UPDATE solo
+sobre columnas del sort key). **No** adoptar `ORDER BY (tenant_id,...)` en
+tablas existentes (rompería el backfill). Mutation que reescribe partes →
+**ventana tranquila + `mutations_sync=2`**. Writer siempre slug explícito;
+fail-closed sin slug (nunca `'default'` como destino).
 
 ### Mecanismo de migraciones por schema (commit `672f698`)
 `options.search_path CURRENT()` + split del contenido de cada migración en
@@ -106,12 +133,16 @@ Migración de datos ClickHouse: `clickhouse-tenant-migration.sql`.
 
 | Repo | Rama | HEAD | Estado |
 |---|---|---|---|
-| super-repo | `exp/multitenant-a2` | `5b0322c` | limpio (salvo submódulo processor sucio) |
+| super-repo | `exp/multitenant-a2` | `9222032` | limpio (salvo submódulo processor sucio) |
 | evo-ai-crm-community | `exp/multitenant-a2` | `5269e2b` | limpio |
 | evo-auth-service-community | `exp/multitenant-a2` | `a01ded9` | limpio |
 | evo-flow-community | `exp/multitenant-a2` | `d639ab5` | limpio |
 | evo-ai-processor-community | `feat/summarize-on-open` | `6d2b624` | **7 archivos sucios** (ajenos a A2) |
 | evo-ai-frontend-community | `fix/chat-list-refetch` | `bda7f233` | limpio, 0 tenancy |
+
+> **Pendiente de commit (super-repo, tras aprobación del plan final):**
+> `scripts/multitenant/CONTRACT.md` + `scripts/multitenant/PLAN-EJECUCION.md`
+> (este HANDOFF los referencia). Commitearlos juntos en `exp/multitenant-a2`.
 
 ### Registro de commits de esta tanda
 - super-repo `5b0322c` — pin flow `d639ab5` + `docker-compose.staging.yml` + `scripts/multitenant/flow-replay-tenant.mjs`.
@@ -145,6 +176,10 @@ Migración de datos ClickHouse: `clickhouse-tenant-migration.sql`.
 
 ### Modelo de leak test a replicar
 `evo-ai-crm-community/spec/multitenant/tenant_isolation_spec.rb` (5/5).
+**Esqueleto agendado en Fase 0 (+0.5d)** y es el **gate al cierre de cada
+fase** (0/A/B/C/D/6). Casos: B no ve datos de A; **token de A + tenant B ⇒
+403**; schema estricto (`<tenant>,extensions` sin `public`). Complementa (no
+reemplaza) los guards estáticos de DoD Fase 2.
 
 ### Evidencia débil a rehacer
 - `scripts/multitenant/e2e_tenant_switch.py:75` usa `<schema>, public, extensions`
@@ -180,9 +215,27 @@ grep -rl "contact_events" src --include='*.ts'                      # flow
 
 ---
 
-## 5. Pendientes (ordenados)
+## 5. Pendientes (ordenados — plan final: `PLAN-EJECUCION.md`)
 
-### Fase 2 corregida — evo-flow (~5.5-6.5 días)
+### Fase 0 — Seguridad auth transversal + esqueleto leak test (1.5d, en serie)
+1. Cookie host-scope: `_evo_rt` ya (path `/api/v1/auth`); **verificar
+   consumidores de `_evo_at`** antes de host-scopearla (¿backend o solo
+   front same-origin?). Quitar `COOKIE_DOMAIN=.evonectech.com` compartido.
+   `secure` + `same_site` estricto.
+2. `AUTH_ALLOWED_HOSTS`: validar `request.host` al emitir/borrar cookies
+   (anti DNS-rebinding / confused-deputy) + validar `Origin`.
+3. **Claims `tenants[]` en JWT** (mapper Doorkeeper; re-emisión en deploy).
+4. **403 por claims** (CONTRACT §4): Flow `TenantInterceptor`, CRM
+   `TenantSwitcher`, Auth `me/validate` — slug resuelto (host o header),
+   saneado `^[a-z0-9_]+$`, resuelto contra el registro, **no en `tenants[]` ⇒
+   403** (jamás `'default'` ni schema ajeno).
+5. Commit `CONTRACT.md` + `PLAN-EJECUCION.md` (+ este HANDOFF).
+6. Esqueleto leak-test 2-tenants (CRM+Flow, model + leak case ver §4).
+
+**DoD**: leak token-A/tenant-B ⇒ 403; cookies host-scoped; claims
+verificados en los 3 backends.
+
+### Track A — evo-flow + ClickHouse (5.5-6.5d, en serie; único bloqueante = 2.4)
 1. **Bypasses que quedan** (re-auditoría 2026-10-09, checklist `bypasses-fase2.md`):
    - `journey-execution.activities.ts:182-183` — `AppDataSource.getRepository(JourneySession/Journey)` (pool global).
    - `campaign-execution.activities.ts:226,281,363` — `app.get('DataSource').getRepository('CampaignContact'/'Campaign')` sin tenant; 6 de 7 inputs sin `tenantId` (solo `UpdateExecutionProgressInput:90` lo lleva).
@@ -191,27 +244,64 @@ grep -rl "contact_events" src --include='*.ts'                      # flow
    - Delicadeza `wait.activities.ts` (ya envuelto): cache singleton `waitRegistryServiceCache` debe quedar por-tenant.
    - Ya migrados en `d639ab5`: journey-trigger-processor (fail-closed), `action-nodes.activities`, `variable-interpolation.util`, `base.node.ts` (seam `getTenantDataSource`).
 2. **Redis namespacing**: registrar `cache_key_scope` en `src/multitenant/register.ts` (el fix va ahí, NO en `tenant-services.ts`).
-3. **ClickHouse**: aplicar `max_bytes_before_external_group_by` (absoluto) en los 3 sitios; verificar versión real de prod antes.
-4. Rehacer replay/e2e con `search_path` estricto (sin `public`).
-5. `clickhouse.service.ts`, `createContactEventsTable()` (`:596-644`): agregar columna `tenant_id` (hoy no la crea; el DDL vive en `clickhouse-tenant-migration.sql`).
-6. Fail-closed `TenantInterceptor`: agregarlo a `contact-events.controller.ts:22`, `event-search.controller.ts:18`, `click-tracking.controller.ts:34`.
+3. **ClickHouse — 2.4 (bloqueante)**: aplicar `max_bytes_before_external_group_by` (absoluto) en los 3 sitios; verificar versión real de prod antes.
+4. **`createContactEventsTable()`** (`clickhouse.service.ts:596-644`): agregar columna `tenant_id` con `ORDER BY` SIN tenant_id (ver decisión §2).
+5. **Backfill**: `ALTER TABLE contact_events UPDATE tenant_id='<slug>' WHERE tenant_id='default'` — mutation, **ventana tranquila + `mutations_sync=2`**; writer fail-closed sin slug (nunca `'default'` como destino); lector `tenant_id=<slug>`.
+6. **kafka_queue + MV**: reconstruye SELECT pasando `tenant_id` (validar en staging; Kafka Engine no corre en clickhouse-local).
+7. Rehacer replay/e2e con `search_path` estricto (sin `public`).
+8. Fail-closed `TenantInterceptor`: `contact-events.controller.ts:22`, `event-search.controller.ts:18`, `click-tracking.controller.ts:34`.
+9. Guards estáticos (2.2), lecturas runtime 16 sitios (2.5), `flow-replay-tenant.mjs` path estricto (2.7), validación + commit (2.8).
 
-### Processor (después de Fase 2)
-- columna `tenant_slug` + RLS (`processor-tenant-migration.sql` ya existe, 12 tablas, sin RLS aún).
-- `Base.metadata.create_all()` en `main.py:226` → `ENABLE/FORCE RLS` → `CREATE POLICY`.
-- `SET LOCAL app.tenant_slug` con patrón SQLAlchemy `after_begin` (el `on_connect` sobre pool **no** vale para `SET LOCAL`).
-- Rol de app sin `BYPASSRLS` (rol admin separado).
-- Los 4 tools `google_calendar` con psycopg2 crudo devuelven 0 filas en silencio → setear GUC explícito o assert.
-- Revisar `PostgresDestination` / `load_pandas_into_postgres` (no aplica RLS a filas cargadas por superuser/BULK).
+**DoD**: leak test 2-tenants verde con schema estricto; bypasses sin fuga;
+CH backfilleado en staging.
 
-### CRM / Auth
+### Track B — Processor (3-4d, **paralelo desde Día 1**; solo contrato del slug)
+- Migración: 12 tablas del SQL + **`users` (13ª)**; revisar
+  `plans/features/plan_features` (globales vs tenant). RLS en las 13
+  (`ENABLE/FORCE` + política `current_setting('app.tenant_slug')`).
+- **2 `SessionLocal()` propios** (`tool_builder.py:70`, `custom_tools.py:84`)
+  + `database.py:63` → sesiones tenant-scoped con GUC `app.tenant_slug` vía
+  `after_begin`.
+- **`custom_tools.py:84`**: resolución de credenciales con contexto de tenant.
+- 4 tools `google_calendar` psycopg2 crudo (create/edit/check/cancel): GUC
+  explícito o fail ruidoso.
+- **Aserción de arranque** post-`create_all` (`main.py`):
+  `relrowsecurity = true` en 13 tablas ⇒ fail rápido
+  (`FAIL_FAST_MULTITENANT=1`).
+- **Reescribir 2 tests legacy**: `test_agent_object_authz.py` ("no owner
+  column") y `test_test_panel_cross_user_isolation.py` (pool-wide).
+- Revisar `PostgresDestination` / `load_pandas_into_postgres` (BULK con RLS).
+- Rol de app SIN `BYPASSRLS` (rol admin separado).
+- Fix `NameError: name 'request' is not defined` (11 archivos `*_routes.py`).
+
+**DoD**: leak test 2-tenants verde en Processor (token A + tenant B ⇒ 403);
+RLS verificada en arranque.
+
+### Track C — Frontend + Auth (2-3d, paralelo)
+- `validate`/`me` → `tenants[]` en el selector del UI (solo muestra los del
+  token); headers `X-Tenant-Slug` en el cliente de API; nginx wildcard
+  `api_tenant` / subrutas.
+- Encaje con claims JWT de Fase 0 (selector consume `tenants[]` firmados).
+
+**DoD**: dos tenants visibles en UI, switching sin datos cruzados.
+
+### Track D — CRM/Auth (2-3d, paralelo)
 - Scheduler pendiente: self-dispatch en `channels/whatsapp/templates_sync_scheduler_job.rb` y `account/conversations_resolution_scheduler_job.rb` (patrón = los otros 12).
 - Auth: `status_statement` fall-resuelto (login verdadero con múltiples `tenants`).
+- Decisión **registro dual** (`public.tenants` en `evo_community` vs
+  `evo_campaign`): sincronización entre ambos a resolver en provisioning (§2).
 
-### Frontend (0 tenancy hoy)
-- `validate` debe devolver `tenants[]`, selector en UI, headers `X-Tenant-Slug` en el cliente de API, nginx por dominio.
+**DoD**: auto-provision de schema; registro dual coherente.
 
-### Super-repo / infra
+### Fase 6 — Provision, backfill y deploy (2-3d)
+- Retarget `provision_tenant.py` → PG local 5433 + alta dual (ambas DBs).
+- Backfill CH en ventana tranquila (`mutations_sync=2`).
+- VPS aislada (Supabase clone / wildcard DNS) + prueba viaje completa T3.
+
+**DoD**: `provision_tenant.py beexa` funcional en staging; stack aislado en
+VPS con backups (§10 AGENTS).
+
+### Super-repo / infra (transversal)
 - Docker daemon en pánico (500 Internal Server Error) — reiniciar (pendiente confirmar).
 - Verificar versión ClickHouse real en prod (solo lectura).
 - Proyecto Supabase clonado + wildcard DNS para prueba VPS real.
@@ -236,15 +326,33 @@ grep -rl "contact_events" src --include='*.ts'                      # flow
    El gate real es `tsc -b` + jest.
 9. `e2e_tenant_switch.py` y `flow-replay-tenant.mjs` incluyen `public` en el
    path → evidencia "0 fugas" debería rehacerse con path estricto.
+10. **Cookie en host compartido**: `beexa-auth.evonectech.com` sirve a TODOS
+    los tenants → host-scope solo detiene el compartir entre subdominios;
+    el aislamiento real es la validación **slug ∈ `tenants[]` ⇒ 403**.
+11. **Falsificación de tenant**: el `X-Tenant-Slug`/host resuelto debe validarse
+    contra los claims; sin eso, usuario de A con header de B entra (caso
+    obligatorio del leak test).
+12. **`ALTER TABLE ... UPDATE` en ClickHouse** falla si `tenant_id` entrara al
+    sort key → mantener `ORDER BY (occurred_at, event_type)` en tablas
+    existentes (backfill roto si se reordena).
+13. **Slug con formatos dispares**: `beexa` en CH vs `cliente_beexa` en PG
+    rompe el matching en silencio → un solo formato vía `CONTRACT.md`, todo
+    derivado desde el registro.
 
 ---
 
 ## 7. Qué sigue
 
-1. Sincronizar los checklist internos con el estado real (ya hecho en este handoff: `bypasses-fase2.md` y `clickhouse-fase2.md` re-auditados a 2026-10-09).
-2. Mentorar Fase 2 Paso 1 (bypasses §5.1) empezando por `journey-execution.activities.ts:182-183`.
-3. Aplicar la decisión Processor (columna `tenant_slug` + RLS) y ClickHouse (setting `max_bytes_before_external_group_by` absoluto).
-4. Continuar con el resto del stack (Frontend, Auth, CRM schedulers).
+1. **Fase 0** (1.5d): cookie host-scope + `AUTH_ALLOWED_HOSTS` + claims
+   `tenants[]` + **403 por claims** + esqueleto leak-test 2-tenants + commit
+   de `CONTRACT.md`/`PLAN-EJECUCION.md`/HANDOFF (super-repo).
+2. **Tracks en paralelo desde Día 1**: A (Flow+ClickHouse, bloqueante 2.4),
+   B (Processor, paralelo), C (Frontend+Auth), D (CRM/Auth).
+3. Empezar Track A por `journey-execution.activities.ts:182-183` (bypass más
+   crítico); Track B por la migración 13 tablas + RLS.
+4. Aplicar decisión ClickHouse (`max_bytes_before_external_group_by` absoluto)
+   y backfill en ventana tranquila.
+5. Cierre de cada fase con el leak test 2-tenants (gate).
 
 ---
 
@@ -253,10 +361,12 @@ grep -rl "contact_events" src --include='*.ts'                      # flow
 ### Glosario
 - **`X-Tenant-Slug`**: header HTTP con el slug del tenant (intake/clientes API). Regex `^[a-z0-9_]+$`; ausente/malformado → `null` (evento legacy).
 - **`tenantId`**: campo del envelope `events-received` e inputs de activities/nodos (concepto Flow).
-- **`tenant_id`**: columna ClickHouse `LowCardinality(String) DEFAULT 'default'`.
+- **`tenant_id`**: columna ClickHouse `LowCardinality(String) DEFAULT 'default'` — valor = slug pelado (`beexa`, no `cliente_beexa`).
 - **schema `cliente_<slug>`**: schema de tenant en Postgres (prefijo obligatorio; `public` nunca).
 - **`public.tenants`**: registro `slug → schema`; por DB (`evo_community` para CRM/Auth, `evo_campaign` para Flow).
 - **`MULTITENANT_SCHEMA=1`**: env (string) que activa el overlay schema-per-tenant en Flow; sin ella, no-op community.
+- **`tenants[]`**: claims firmados del JWT (Fase 0) con los slugs del usuario; **403** si el slug resuelto del request no está ahí.
+- **`CONTRACT.md`**: fuente de verdad de nomenclatura (slug canónico + derivados) y de la regla de autorización por claims.
 - **legacy `'default'`**: evento sin tenant atribuido = pool global (solo escritura); lectura SIEMPRE fail-closed sin tenant.
 
 ### Definition of Done (Fase 2)
@@ -265,3 +375,4 @@ grep -rl "contact_events" src --include='*.ts'                      # flow
 3. Search path estricto (`<tenant>,extensions`, sin `public`) en runtime y en replay/e2e; evidencia nueva con path estricto.
 4. Journey fail-closed: con `MULTITENANT_SCHEMA=1` y evento sin `tenantId` → skip con log `withoutTenantAttribution`.
 5. Suite completa de Flow verde (hoy: 142 suites / 1139 tests) + `npx tsc -b --noEmit` limpio.
+6. **Leak test 2-tenants verde** (B no ve datos de A + token A/tenant B ⇒ 403) al cierre de fase — gate global, no solo de Fase 2.
