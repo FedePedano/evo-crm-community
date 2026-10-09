@@ -110,5 +110,130 @@ services:
     command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
     profiles: ["sidekiq"] # arrancar explícito: --profile sidekiq
 
+  # ---------------------------------------------------------------------------
+  # evo-flow (NestJS) — DB propia (postgres-flow), como en dev. Fase 2 A2.
+  # ---------------------------------------------------------------------------
+  postgres-flow:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: flow
+      POSTGRES_PASSWORD: flow_staging_pw
+      POSTGRES_DB: flow_staging
+    ports:
+      - "5433:5432"
+    volumes:
+      - staging_flow_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flow -d flow_staging"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Kafka para flow-staging (broker de eventos) -------------------------
+  zookeeper-staging:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - staging_zookeeper:/var/lib/zookeeper/data
+      - staging_zookeeper_log:/var/lib/zookeeper/log
+
+  kafka-staging:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper-staging
+    ports:
+      - "9095:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper-staging:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-staging:29092,PLAINTEXT_HOST://localhost:9095
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_COMPRESSION_TYPE: gzip
+
+  clickhouse-staging:
+    # Pineado a 22.8 LTS: `max_bytes_ratio_before_external_group_by` (usado por
+    # clickhouse.service.ts) se eliminó en ClickHouse 23.x/24.x.
+    # OJO: producción usa `latest`; su imagen cacheada debe verificarse antes de
+    # cualquier re-pull (mismo riesgo en la VPS aislada).
+    image: clickhouse/clickhouse-server:22.8
+    ports:
+      - "8124:8123"
+      - "9001:9000"
+    environment:
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: password
+      CLICKHOUSE_DB: evo_campaign
+    volumes:
+      - staging_clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  flow-staging:
+    build:
+      context: ./evo-flow-community
+      dockerfile: Dockerfile
+    ports:
+      - "3200:3000"
+    env_file:
+      - .env.test
+    environment:
+      RUN_MODE: api
+      PORT: 3000
+      MULTITENANT_SCHEMA: "1"
+      BROKER_TYPE: kafka
+      KAFKA_BROKERS: kafka-staging:29092
+      KAFKA_CLIENT_ID: evo-flow-staging
+      CLICKHOUSE_HOST: clickhouse-staging
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USERNAME: default
+      CLICKHOUSE_PASSWORD: password
+      CLICKHOUSE_DATABASE: evo_campaign
+      POSTGRES_DB_HOST: postgres-flow
+      POSTGRES_DB_PORT: 5432
+      POSTGRES_DB_USERNAME: flow
+      POSTGRES_DB_PASSWORD: flow_staging_pw
+      POSTGRES_DB_DATABASE: flow_staging
+      POSTGRES_SSLMODE: disable
+      TYPEORM_LOGGING: "false"
+      # Cliente s2s del CRM (campaigns, contacts, templates). Apunta al
+      # servicio del mismo compose, NO a localhost (dentro del contenedor
+      # localhost sería el propio flow).
+      EVOAI_CRM_BASE_URL: http://crm-staging:3000
+      EVOAI_CRM_API_TOKEN: ${STAGING_CRM_SERVICE_TOKEN:-staging-dummy-service-token}
+    depends_on:
+      postgres-flow:
+        condition: service_healthy
+      crm-staging:
+        condition: service_started
+      kafka-staging:
+        condition: service_started
+      clickhouse-staging:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    profiles: ["flow"] # arrancar explícito: --profile flow
+
 volumes:
   staging_redis:
+  staging_flow_pg:
+  staging_zookeeper:
+  staging_zookeeper_log:
+  staging_clickhouse:
