@@ -73,10 +73,9 @@ servicio de auth:
    (idéntico al flujo de Doorkeeper): la fila debe existir, **no** estar revocada
    y **no** estar expirada. **No** verifica firma, `iss` ni `aud` — el JWT es
    solo el formato de almacenamiento del token, que se resuelve por lookup
-   (nunca por decode). Devuelve `data.tenants`; el formato contractual
-   **objetivo** es array de slugs activos (`string[]`, p. ej. `["acme","globex"]`),
-   pero **hoy** se devuelven objetos (ver nota de estado). `decode_jwt_token`
-   existe pero no se invoca; no forma parte del flujo.
+   (nunca por decode). Devuelve `data.tenants` como array de **slugs activos**
+   (`string[]`, p. ej. `["acme","globex"]`), sin exponer `schema_name`/`plan`/`role`.
+   `decode_jwt_token` existe pero no se invoca; no forma parte del flujo.
 3. El slug resuelto por Flow (§1–§4) DEBE pertenecer a ese array.
 4. Responder **`403`** (fail-closed) si: el token es inválido/expirado, falta
    `tenants[]`, el array está vacío, o el slug resuelto no está incluido.
@@ -90,11 +89,11 @@ servicio de auth:
 > **Estado garantizado (2026-10-10):** `POST /validate` resuelve el token por
 > lookup en `oauth_access_tokens` y rechaza token inexistente, expirado y
 > **revocado** (cubierto por `spec/services/token_validation_service_spec.rb`).
-> Firma, `iss` y `aud` quedan **fuera del contrato a propósito**: el token se
-> trata como opaco/DB-backed y `decode_jwt_token` no se usa (código muerto).
-> Pendiente y aún **no garantizado**: `data.tenants` sigue devolviéndose como
-> objetos (`{slug,schema_name,plan,role}`); normalizarlo a `string[]` de slugs es
-> requisito previo al 403 (Fase 0.4).
+> `data.tenants` es un `string[]` de slugs activos con membresía válida, sin
+> `schema_name`/`plan`/`role` (cubierto por
+> `spec/requests/api/v1/auth_validate_tenants_spec.rb`). Firma, `iss` y `aud`
+> quedan **fuera del contrato a propósito**: el token se trata como
+> opaco/DB-backed y `decode_jwt_token` no se usa (código muerto).
 
 ## 5. Redis multi-tenant
 
