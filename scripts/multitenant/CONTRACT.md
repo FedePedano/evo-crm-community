@@ -1,6 +1,6 @@
 # CONTRACT — Identidad de tenant multitenant A2
 
-> Versión: 2026-10-10. Fuente de verdad de NOMENCLATURA y de la regla de
+> Versión: 2026-10-11. Fuente de verdad de NOMENCLATURA y de la regla de
 > autorización por claims. Ningún servicio deriva el slug por su cuenta:
 > todos lo LEEN del registro de tenants. Documento hermano de `PLAN-EJECUCION.md`.
 
@@ -77,16 +77,19 @@ servicio de auth:
    (`string[]`, p. ej. `["acme","globex"]`), sin exponer `schema_name`/`plan`/`role`.
    `decode_jwt_token` existe pero no se invoca; no forma parte del flujo.
 3. El slug resuelto por Flow (§1–§4) DEBE pertenecer a ese array.
-4. Responder **`403`** (fail-closed) si: el token es inválido/expirado, falta
-   `tenants[]`, el array está vacío, o el slug resuelto no está incluido.
+4. Responder **fail-closed** (nunca fail-open, jamás `'default'`), distinguiendo
+   autenticación de autorización: **`401`** si el token es inválido/expirado o
+   si falta `tenants[]` / el array está vacío (en Flow el `BearerAuthGuard` lo
+   trata como fallo de autenticación); **`403`** si el slug resuelto no está
+   incluido en `tenants[]`.
 5. **Nunca** fallback a `'default'` ni al schema de otro tenant.
-6. En rutas tenant-aware, errores de Auth (5xx) o **timeout** ⇒ **fail-closed**
-   (no fail-open).
+6. En rutas tenant-aware, errores de Auth (5xx), **timeout** o error de red ⇒
+   **fail-closed** (`503 ServiceUnavailable` en Flow; nunca fail-open).
 7. Mecanismo de autenticación: `/validate` acepta `Authorization: Bearer <jwt>`
    o el header `api_access_token`; **no** acepta cookies (`_evo_at`/`_evo_rt`).
    Flow forwardea el Bearer.
 
-> **Estado garantizado (2026-10-10):** `POST /validate` resuelve el token por
+> **Estado garantizado (2026-10-11):** `POST /validate` resuelve el token por
 > lookup en `oauth_access_tokens` y rechaza token inexistente, expirado y
 > **revocado** (cubierto por `spec/services/token_validation_service_spec.rb`).
 > `data.tenants` es un `string[]` de slugs activos con membresía válida, sin
@@ -94,6 +97,10 @@ servicio de auth:
 > `spec/requests/api/v1/auth_validate_tenants_spec.rb`). Firma, `iss` y `aud`
 > quedan **fuera del contrato a propósito**: el token se trata como
 > opaco/DB-backed y `decode_jwt_token` no se usa (código muerto).
+> **Consumo en Flow (Fase 0.4a/0.4b):** `src/auth/bearer-auth.guard.ts` consume
+> `/validate` y publica `request.tenants`/CLS `tenants`;
+> `src/multitenant/tenant.interceptor.ts` exige pertenencia a `tenants[]` ⇒ 403
+> (specs `bearer-auth.guard.spec.ts`, `tenant.interceptor.spec.ts`).
 
 ## 5. Redis multi-tenant
 

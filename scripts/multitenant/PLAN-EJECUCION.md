@@ -31,6 +31,13 @@
 
 ## Fase 0 — Seguridad auth transversal + esqueleto leak test (1.5d, en serie)
 
+> **Estado (2026-10-11): COMPLETADA** (el leak-test dinámico queda como gate de
+> cierre de cada fase). Cookie host-scope + `AUTH_ALLOWED_HOSTS` + claims
+> `tenants[]` en JWT (`77fecc8`→`ddaba81`); consumo `/validate` y 403 por claims
+> en Flow (`2ec7974`, `78e95dc`); docs y pins super-repo
+> (`f76ba12`→`2559684`). Detalle en `HANDOFF.md` §2/§3/§5 y contrato de
+> consumo/403 en `CONTRACT.md` §4.1.
+
 1. Cookie host-scope: `_evo_rt` de inmediato (path `/api/v1/auth`); verificar
    consumidores de `_evo_at` antes de host-scopearla. Quitar el
    `COOKIE_DOMAIN=.evonectech.com` compartido. `secure` + `same_site` estricto.

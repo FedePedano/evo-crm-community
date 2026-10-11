@@ -1,7 +1,7 @@
 # HANDOFF — Multitenant A2 (evo-flow / evo-crm)
 
-> Estado al **2026-10-09**, rama `exp/multitenant-a2`. Documento hermano de
-> `AGENTS.md` y `INTEGRAR_NUEVO_CANAL.txt`.
+> Estado al **2026-10-11**, rama `exp/multitenant-a2` (Fase 0 completa).
+> Documento hermano de `AGENTS.md` y `INTEGRAR_NUEVO_CANAL.txt`.
 > Plan de ejecución final: `scripts/multitenant/PLAN-EJECUCION.md`.
 > Contrato de slug/seguridad: `scripts/multitenant/CONTRACT.md`.
 
@@ -11,18 +11,20 @@
 
 La **Fase A de multitenant (A2)** está completa en **CRM** y **Auth**, y la
 parte de **evo-flow** está **propagada y commiteada** en la rama
-`exp/multitenant-a2` (working tree limpio). Pendiente: Fase 2 corregida
-(bypasses que quedan), el **Processor** (sin tocar), y el **Frontend** (sin
-tocar). Todo validado localmente (tests y typecheck verdes) y reproducible en
-el staging local.
+`exp/multitenant-a2` (working tree limpio). La **Fase 0 (seguridad Auth
+transversal + consumo/403 por claims)** está **completa** en Auth y Flow
+(detalle en §2, §3 y §5). Pendiente: Fase 2 corregida (bypasses que quedan,
+Track A), el **Processor** (sin tocar), y el **Frontend** (sin tocar). Todo
+validado localmente (tests y typecheck verdes) y reproducible en el staging
+local.
 
 Progreso por servicio (evidencia en §4):
 
 | Servicio | Estado A2 | Rama/commit | Working tree |
 |---|---|---|---|
 | evo-crm | **Completo** | `exp/multitenant-a2` `5269e2b` | limpio |
-| evo-auth | **Completo** (solo `validate`) | `exp/multitenant-a2` `a01ded9` | limpio |
-| evo-flow | **Propagado** (Fase 2 pendiente) | `exp/multitenant-a2` `d639ab5` | limpio |
+| evo-auth | **Completo** (Fase 0: cookie host-scope, `AUTH_ALLOWED_HOSTS`, claims `tenants[]`, `/validate` `string[]`) | `exp/multitenant-a2` `ddaba81` | limpio |
+| evo-flow | **Propagado + Fase 0** (0.4a/0.4b: consume `/validate` + 403 por claims; Fase 2/Track A pendiente) | `exp/multitenant-a2` `78e95dc` | limpio |
 | evo-ai-processor | **Pendiente** | `feat/summarize-on-open` `6d2b624` | 7 archivos sucios (summarize/GC, ajenos a A2) |
 | evo-ai-frontend | **Pendiente** | `fix/chat-list-refetch` `bda7f233` | limpio, 0 tenancy |
 
@@ -51,15 +53,24 @@ tenant; el 14º (`account/conversations_resolution_scheduler_job.rb`) pendiente
 de self-dispatch (ver §5, S2). Endpoint-audit: 206 rutas, 0 fugas.
 Spec `tenant_isolation_spec.rb` (5/5) en `spec/multitenant/`.
 
-**Auth (`a01ded9`)** — único endpoint tenant-aware: `validate` devuelve
-`tenants[]` por email. login/refresh/me/register sin tenants, JWT sin claims
-de tenant. **Pendiente (Fase 0, plan final):** cookie host-scope a
-`beexa-auth.evonectech.com` (hoy `COOKIE_DOMAIN=.evonectech.com` compartido),
-`AUTH_ALLOWED_HOSTS`, claims `tenants[]` en JWT y **403 por claims**
-(§CONTRACT 4). `_evo_rt` scope ya; verificar consumidores de `_evo_at`.
-Pendiente (Track D): `status_statement` fall-resuelto para login verdadero.
+**Auth (`ddaba81`)** — **Fase 0 completa.** `validate` devuelve `data.tenants`
+como `string[]` de slugs activos (sin `schema_name`/`plan`/`role`) y el JWT
+lleva el claim `tenants` (mismos slugs); ambos salen de
+`UserTenants.active_slugs_for` (membresía por email contra `public.tenants` +
+`public.tenant_memberships`, status `active`; sin tabla/membresía ⇒ `[]`).
+`JwtClaimsBuilder` (extraído de `doorkeeper.rb`) preserva los claims previos y
+añade `tenants`. Cookie **host-only**: en producción `cookie_domain` devuelve
+`nil` salvo override explícito `COOKIE_DOMAIN` (se quitó el
+`.evonectech.com` compartido); `_evo_rt` con path `/api/v1/auth`, `secure` +
+`same_site: :none` cuando la request es segura (dev/ngrok sin domain).
+`AUTH_ALLOWED_HOSTS` (allowlist, soporta `*.`; `*` desactiva; vacío = sin
+check) + `Origin` (`AUTH_ALLOWED_ORIGINS` / `CORS_ORIGINS` / `FRONTEND_URL`) ⇒
+**403**: host+origin en login/refresh/logout (`ensure_allowed_cookie_request!`)
+y solo origin en `validate` (`ensure_allowed_origin!`; server-to-server sin
+Origin sigue OK). Pendiente (Track D): `status_statement` fall-resuelto para
+login verdadero.
 
-**Flow (`d639ab5`)** — overlay schema-per-tenant (seam `tenant_db_context`,
+**Flow (`78e95dc`)** — overlay schema-per-tenant (seam `tenant_db_context`,
 `options.search_path` por migración, `SET LOCAL` dentro de txn) + propagación
 de `tenantId` por todo el pipeline:
 - `payload-normalizer` lee `X-Tenant-Slug` y **sanear** el slug (`^[a-z0-9_]+$`).
@@ -69,6 +80,16 @@ de `tenantId` por todo el pipeline:
   `servicesForTenant` / `activeJourneysForTenant`.
 - `journey-trigger-processor`: **fail-closed** si `MULTITENANT_SCHEMA` está
   activado y el evento no trae `tenantId`; log total con `withoutTenantAttribution`.
+- **Fase 0.4a** `src/auth/bearer-auth.guard.ts` (guard global `APP_GUARD`):
+  consume `POST {EVO_AUTH_SERVICE_URL}/api/v1/auth/validate` reenviando
+  `Authorization: Bearer`, exige `tenants[]` no vacío (si no ⇒ **401**),
+  publica `request.tenants` + CLS `tenants`; 5xx/timeout/error de red ⇒ **503**
+  (fail-closed). Specs: `bearer-auth.guard.spec.ts`.
+- **Fase 0.4b** `src/multitenant/tenant.interceptor.ts` (aplicado a
+  `contact-events`, `event-search`, `click-tracking`): resuelve el slug
+  (header `X-Tenant-Slug` o subdominio), lo **sanea** (`^[a-z0-9_]+$`) y exige
+  que pertenezca a `tenants[]` del contexto autenticado ⇒ si no, **403**
+  (jamás `default`). Specs: `tenant.interceptor.spec.ts`.
 
 **Processor (pendiente, decisión tomada — Track B, paralelo desde Día 1):**
 columna `tenant_slug` en las tablas + RLS.
@@ -133,16 +154,17 @@ Migración de datos ClickHouse: `clickhouse-tenant-migration.sql`.
 
 | Repo | Rama | HEAD | Estado |
 |---|---|---|---|
-| super-repo | `exp/multitenant-a2` | `9222032` | limpio (salvo submódulo processor sucio) |
+| super-repo | `exp/multitenant-a2` | `2559684` | limpio (salvo submódulo processor sucio) |
 | evo-ai-crm-community | `exp/multitenant-a2` | `5269e2b` | limpio |
-| evo-auth-service-community | `exp/multitenant-a2` | `a01ded9` | limpio |
-| evo-flow-community | `exp/multitenant-a2` | `d639ab5` | limpio |
+| evo-auth-service-community | `exp/multitenant-a2` | `ddaba81` | limpio |
+| evo-flow-community | `exp/multitenant-a2` | `78e95dc` | limpio |
 | evo-ai-processor-community | `feat/summarize-on-open` | `6d2b624` | **7 archivos sucios** (ajenos a A2) |
 | evo-ai-frontend-community | `fix/chat-list-refetch` | `bda7f233` | limpio, 0 tenancy |
 
-> **Pendiente de commit (super-repo, tras aprobación del plan final):**
-> `scripts/multitenant/CONTRACT.md` + `scripts/multitenant/PLAN-EJECUCION.md`
-> (este HANDOFF los referencia). Commitearlos juntos en `exp/multitenant-a2`.
+> **Docs de Fase 0 (super-repo, commiteados en `exp/multitenant-a2`):**
+> `scripts/multitenant/CONTRACT.md`, `scripts/multitenant/PLAN-EJECUCION.md` y
+> este `HANDOFF.md`. El checkpoint 0.5 sincroniza los tres con el estado real
+> de Fase 0 (commits Auth `ddaba81`, Flow `78e95dc`, super `2559684`).
 
 ### Registro de commits de esta tanda
 - super-repo `5b0322c` — pin flow `d639ab5` + `docker-compose.staging.yml` + `scripts/multitenant/flow-replay-tenant.mjs`.
@@ -151,6 +173,16 @@ Migración de datos ClickHouse: `clickhouse-tenant-migration.sql`.
 - Flow `5d50732` — migración ClickHouse `tenant_id` + checklist fase 2.
 - Flow `706f8a4` — `bypasses-fase2.md` (checklist).
 - Flow `b51143d` — overlay schema-per-tenant (seam `tenant_db_context`).
+
+### Fase 0 — commits (Auth + Flow + docs)
+- Auth `77fecc8` — 0.1 cookie host-scope en producción.
+- Auth `8e35926` — 0.2 `AUTH_ALLOWED_HOSTS` + validación de `Origin`.
+- Auth `7d810fd` — 0.3 claim JWT `tenants[]` (slugs activos).
+- Auth `141ed4f` — cierre de brechas Doorkeeper (`/validate` rechaza revocado en cache miss).
+- Auth `ddaba81` — 0.3/`/validate`: `data.tenants` normalizado a `string[]`.
+- Flow `2ec7974` — 0.4a consume `/validate` + propaga `tenants[]`.
+- Flow `78e95dc` — 0.4b autorización tenant-aware (403 por claims).
+- super-repo `f76ba12` / `1b0e571` / `bda5ada` / `2cb44bd` / `2559684` — docs y pins de Fase 0.
 
 > ⚠️ El Processor **NO** está en `exp/multitenant-a2`; está en `feat/summarize-on-open`
 > con working tree sucio (fixes google_calendar/tool_builder vía `git diff`). NO
@@ -161,9 +193,16 @@ Migración de datos ClickHouse: `clickhouse-tenant-migration.sql`.
 ## 4. Cómo validar / evidencia
 
 ### Local (mi máquina)
-- Flow: `npx tsc -b --noEmit` exit 0; suite completa **142 suites / 1139 tests
+- Flow: `npx tsc -b --noEmit` exit 0; suite completa **144 suites / 1158 tests
   passed, 4 skipped** (con `EVOAI_CRM_API_TOKEN`/`EVOAI_CRM_BASE_URL`/
-  `POSTGRES_DB_HOST`).
+  `POSTGRES_DB_HOST`; sin esas env fallan 3 suites pre-existentes).
+- Fase 0.4a/0.4b (Flow): `bearer-auth.guard.spec.ts` (9) y
+  `tenant.interceptor.spec.ts` (10) verdes; cubren consume `/validate`,
+  `tenants[]` no vacío, y token-A/tenant-B ⇒ 403.
+- Auth (Fase 0): `spec/services/user_tenants_spec.rb`,
+  `spec/requests/api/v1/auth_validate_tenants_spec.rb` (5) y
+  `spec/services/token_validation_service_spec.rb` (11) verdes (validados en
+  contenedor efímero en la VPS; la suite Rails no corre local).
 - Espec `single-account.spec.ts` (guard FR44): sanciones A2 documentadas
   (4 tokens ident + 6 líneas neutras anchoradas; self-tests OK).
 - Espec journeys: mock de `multitenant/tenant-services`; aserciones de log con
@@ -217,23 +256,35 @@ grep -rl "contact_events" src --include='*.ts'                      # flow
 
 ## 5. Pendientes (ordenados — plan final: `PLAN-EJECUCION.md`)
 
-### Fase 0 — Seguridad auth transversal + esqueleto leak test (1.5d, en serie)
-1. Cookie host-scope: `_evo_rt` ya (path `/api/v1/auth`); **verificar
-   consumidores de `_evo_at`** antes de host-scopearla (¿backend o solo
-   front same-origin?). Quitar `COOKIE_DOMAIN=.evonectech.com` compartido.
-   `secure` + `same_site` estricto.
-2. `AUTH_ALLOWED_HOSTS`: validar `request.host` al emitir/borrar cookies
-   (anti DNS-rebinding / confused-deputy) + validar `Origin`.
-3. **Claims `tenants[]` en JWT** (mapper Doorkeeper; re-emisión en deploy).
-4. **403 por claims** (CONTRACT §4): Flow `TenantInterceptor`, CRM
-   `TenantSwitcher`, Auth `me/validate` — slug resuelto (host o header),
-   saneado `^[a-z0-9_]+$`, resuelto contra el registro, **no en `tenants[]` ⇒
-   403** (jamás `'default'` ni schema ajeno).
-5. Commit `CONTRACT.md` + `PLAN-EJECUCION.md` (+ este HANDOFF).
-6. Esqueleto leak-test 2-tenants (CRM+Flow, model + leak case ver §4).
+### Fase 0 — Seguridad auth transversal + esqueleto leak test ✅ COMPLETADA
+1. ✅ **Cookie host-scope**: `cookie_domain` host-only en producción (devuelve
+   `nil` salvo override explícito `COOKIE_DOMAIN`); `_evo_rt` con path
+   `/api/v1/auth`; `secure` + `same_site: :none` cuando la request es segura
+   (dev/ngrok sin domain). Commit Auth `77fecc8`.
+2. ✅ **`AUTH_ALLOWED_HOSTS`** (allowlist, soporta `*.`; `*` desactiva; vacío =
+   sin check) + **`Origin`** (`AUTH_ALLOWED_ORIGINS`/`CORS_ORIGINS`/`FRONTEND_URL`):
+   403 en login/refresh/logout (host+origin) y en `validate` (solo origin).
+   Commit Auth `8e35926`. Specs `auth_helper_allowed_hosts_spec.rb`,
+   `auth_helper_cookie_domain_spec.rb`.
+3. ✅ **Claims `tenants[]` en JWT** (`JwtClaimsBuilder` + `UserTenants`; solo
+   slugs activos). Commit Auth `7d810fd`. Specs `jwt_claims_builder_spec.rb`,
+   `jwt_claims_signing_spec.rb`.
+4. ✅ **Autorización por claims**: Auth `/validate` devuelve `data.tenants`
+   `string[]` de slugs activos (`141ed4f`, `ddaba81`); Flow 0.4a
+   (`bearer-auth.guard.ts`) consume `/validate` (401 si falta token o
+   `tenants[]`; 503 en 5xx/timeout) y 0.4b (`tenant.interceptor.ts`) ⇒ **403**
+   si el slug resuelto ∉ `tenants[]` (`2ec7974`, `78e95dc`). CRM mantiene
+   `verify_tenant_membership!` (membresía por email); la validación por claims
+   en `TenantSwitcher` queda fuera de esta fase.
+5. ✅ **Commit `CONTRACT.md` + `PLAN-EJECUCION.md` + este `HANDOFF.md`** —
+   checkpoint 0.5.
+6. ⏳ **Esqueleto leak-test 2-tenants**: el modelo CRM
+   (`spec/multitenant/tenant_isolation_spec.rb`) ya existe; portar a Flow+Auth
+   con el caso token-A/tenant-B ⇒ 403 al cierre de Track A (ver §4).
 
-**DoD**: leak token-A/tenant-B ⇒ 403; cookies host-scoped; claims
-verificados en los 3 backends.
+**DoD** (parcial): cookies host-scoped y claims `tenants[]` verificados en
+Auth+Flow con fail-closed (401/403/503); el leak test dinámico corre al cierre
+de Track A.
 
 ### Track A — evo-flow + ClickHouse (5.5-6.5d, en serie; único bloqueante = 2.4)
 1. **Bypasses que quedan** (re-auditoría 2026-10-09, checklist `bypasses-fase2.md`):
@@ -249,7 +300,9 @@ verificados en los 3 backends.
 5. **Backfill**: `ALTER TABLE contact_events UPDATE tenant_id='<slug>' WHERE tenant_id='default'` — mutation, **ventana tranquila + `mutations_sync=2`**; writer fail-closed sin slug (nunca `'default'` como destino); lector `tenant_id=<slug>`.
 6. **kafka_queue + MV**: reconstruye SELECT pasando `tenant_id` (validar en staging; Kafka Engine no corre en clickhouse-local).
 7. Rehacer replay/e2e con `search_path` estricto (sin `public`).
-8. Fail-closed `TenantInterceptor`: `contact-events.controller.ts:22`, `event-search.controller.ts:18`, `click-tracking.controller.ts:34`.
+8. ✅ (hecho en **Fase 0.4b**) `TenantInterceptor` aplicado y fail-closed en
+   `contact-events.controller.ts`, `event-search.controller.ts`,
+   `click-tracking.controller.ts`.
 9. Guards estáticos (2.2), lecturas runtime 16 sitios (2.5), `flow-replay-tenant.mjs` path estricto (2.7), validación + commit (2.8).
 
 **DoD**: leak test 2-tenants verde con schema estricto; bypasses sin fuga;
@@ -343,9 +396,10 @@ VPS con backups (§10 AGENTS).
 
 ## 7. Qué sigue
 
-1. **Fase 0** (1.5d): cookie host-scope + `AUTH_ALLOWED_HOSTS` + claims
-   `tenants[]` + **403 por claims** + esqueleto leak-test 2-tenants + commit
-   de `CONTRACT.md`/`PLAN-EJECUCION.md`/HANDOFF (super-repo).
+1. ✅ **Fase 0 completada**: cookie host-scope + `AUTH_ALLOWED_HOSTS` + claims
+   `tenants[]` en JWT + **403 por claims** en Flow + `CONTRACT.md`/
+   `PLAN-EJECUCION.md`/HANDOFF commiteados (super-repo). Falta el esqueleto
+   leak-test 2-tenants (se ejecuta como gate de Track A).
 2. **Tracks en paralelo desde Día 1**: A (Flow+ClickHouse, bloqueante 2.4),
    B (Processor, paralelo), C (Frontend+Auth), D (CRM/Auth).
 3. Empezar Track A por `journey-execution.activities.ts:182-183` (bypass más
